@@ -1,325 +1,333 @@
 import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import * as d3 from 'd3';
-import { BubbleChartData, BubbleNode, BubbleLink } from './types';
-import { CLUSTER_COLORS } from './sampleData';
+import { ChartData, NodeDatum, LinkDatum } from './types';
 
 interface BubbleChartProps {
-  data: BubbleChartData;
+  data: ChartData;
   width?: number;
   height?: number;
 }
 
-interface TooltipState {
-  visible: boolean;
-  x: number;
-  y: number;
-  node: BubbleNode | null;
+function formatAddr(addr: string): string {
+  if (addr.length <= 13) return addr;
+  return addr.slice(0, 6) + '...' + addr.slice(-4);
 }
-
-const TYPE_ICONS: Record<string, string> = {
-  cex: '◈',
-  dex: '⬡',
-  contract: '▣',
-  wallet: '●',
-};
-
-const TYPE_LABELS: Record<string, string> = {
-  cex: 'CEX',
-  dex: 'DEX',
-  contract: 'Contract',
-  wallet: 'Wallet',
-};
 
 function formatNumber(n: number): string {
   if (n >= 1e12) return `${(n / 1e12).toFixed(2)}T`;
   if (n >= 1e9) return `${(n / 1e9).toFixed(2)}B`;
   if (n >= 1e6) return `${(n / 1e6).toFixed(2)}M`;
-  if (n >= 1e3) return `${(n / 1e3).toFixed(2)}K`;
-  return n.toFixed(2);
+  if (n >= 1e3) return `${(n / 1e3).toFixed(1)}K`;
+  return n.toFixed(0);
 }
 
-function formatUSD(n: number): string {
-  if (n >= 1e9) return `$${(n / 1e9).toFixed(2)}B`;
-  if (n >= 1e6) return `$${(n / 1e6).toFixed(2)}M`;
-  if (n >= 1e3) return `$${(n / 1e3).toFixed(2)}K`;
-  return `$${n.toFixed(2)}`;
-}
-
-const BubbleChart: React.FC<BubbleChartProps> = ({ data, width = 900, height = 700 }) => {
+const BubbleChart: React.FC<BubbleChartProps> = ({ data, width: propWidth, height: propHeight }) => {
   const svgRef = useRef<SVGSVGElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const simulationRef = useRef<d3.Simulation<BubbleNode, BubbleLink> | null>(null);
-  const [tooltip, setTooltip] = useState<TooltipState>({ visible: false, x: 0, y: 0, node: null });
-  const [selectedNode, setSelectedNode] = useState<BubbleNode | null>(null);
+  const simulationRef = useRef<d3.Simulation<NodeDatum, LinkDatum> | null>(null);
+
+  const [selectedWallet, setSelectedWallet] = useState<NodeDatum | null>(null);
+  const [hoveredNode, setHoveredNode] = useState<NodeDatum | null>(null);
+  const [hoverPos, setHoverPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [searchTerm, setSearchTerm] = useState('');
-  const [activeFilters, setActiveFilters] = useState<Set<string>>(new Set(['wallet', 'contract', 'cex', 'dex']));
-  const [hoveredListItem, setHoveredListItem] = useState<string | null>(null);
+  const [highlightedId, setHighlightedId] = useState<string | null>(null);
 
-  // Build nodes
-  const { nodes, links } = useMemo(() => {
-    const minRadius = 3;
-    const maxRadius = 55;
-    const maxPerc = Math.max(...data.holders.map(h => h.percentage));
+  const [dimensions, setDimensions] = useState({ width: propWidth || 900, height: propHeight || 700 });
 
-    const builtNodes: BubbleNode[] = data.holders.map(h => {
-      const pctNorm = h.percentage / maxPerc;
-      const radius = minRadius + Math.sqrt(pctNorm) * (maxRadius - minRadius);
-      const clusterColor = CLUSTER_COLORS[h.clusterId % CLUSTER_COLORS.length];
-      const lighterColor = d3.color(clusterColor)?.brighter(0.3)?.toString() || clusterColor;
-
-      return {
-        id: h.address,
-        address: h.address,
-        label: h.label,
-        percentage: h.percentage,
-        balance: h.balance,
-        balanceUSD: h.balanceUSD,
-        type: h.type,
-        icon: h.icon,
-        clusterId: h.clusterId,
-        radius,
-        color: clusterColor,
-        borderColor: lighterColor,
-      };
-    });
-
-    const nodeSet = new Set(builtNodes.map(n => n.id));
-    const builtLinks: BubbleLink[] = data.transfers
-      .filter(t => nodeSet.has(t.source) && nodeSet.has(t.target))
-      .map(t => ({
-        source: t.source,
-        target: t.target,
-        weight: t.weight || 1,
-      }));
-
-    return { nodes: builtNodes, links: builtLinks };
-  }, [data]);
-
-  // Filtered nodes for sidebar
-  const filteredHolders = useMemo(() => {
-    return nodes
-      .filter(n => activeFilters.has(n.type))
-      .filter(n => {
-        if (!searchTerm) return true;
-        const term = searchTerm.toLowerCase();
-        return (
-          n.address.toLowerCase().includes(term) ||
-          (n.label && n.label.toLowerCase().includes(term))
-        );
-      })
-      .sort((a, b) => b.percentage - a.percentage);
-  }, [nodes, searchTerm, activeFilters]);
-
-  const toggleFilter = useCallback((type: string) => {
-    setActiveFilters(prev => {
-      const next = new Set(prev);
-      if (next.has(type)) {
-        if (next.size > 1) next.delete(type);
-      } else {
-        next.add(type);
+  // Responsive sizing
+  useEffect(() => {
+    if (propWidth && propHeight) return;
+    const update = () => {
+      if (containerRef.current) {
+        const sidebar = 320;
+        const w = window.innerWidth - sidebar;
+        const h = window.innerHeight;
+        setDimensions({ width: Math.max(400, w), height: Math.max(400, h) });
       }
-      return next;
-    });
-  }, []);
+    };
+    update();
+    window.addEventListener('resize', update);
+    return () => window.removeEventListener('resize', update);
+  }, [propWidth, propHeight]);
+
+  const { width, height } = dimensions;
+
+  // Prepare sorted nodes
+  const sortedNodes = useMemo(() => {
+    const sorted = [...data.nodes].sort((a, b) => b.percentage - a.percentage);
+    sorted.forEach((n, i) => { n.rank = i + 1; });
+    return sorted;
+  }, [data.nodes]);
+
+  // Filtered list for sidebar
+  const filteredWallets = useMemo(() => {
+    if (!searchTerm) return sortedNodes;
+    const term = searchTerm.toLowerCase();
+    return sortedNodes.filter(w =>
+      w.name.toLowerCase().includes(term) || w.id.toLowerCase().includes(term)
+    );
+  }, [sortedNodes, searchTerm]);
+
+  // Radius scale
+  const radiusScale = useMemo(() => {
+    const maxAmt = d3.max(data.nodes, d => d.amount) || 1;
+    return d3.scaleSqrt().domain([0, maxAmt]).range([3, 45]);
+  }, [data.nodes]);
+
+  // Click on sidebar rank → highlight + zoom to node
+  const handleSidebarClick = useCallback((node: NodeDatum) => {
+    setSelectedWallet(node);
+    setHighlightedId(node.id);
+
+    // Zoom to the node
+    if (svgRef.current && node.x != null && node.y != null) {
+      const svg = d3.select(svgRef.current);
+      const zoom = (svg.node() as any).__zoom_behavior;
+      if (zoom) {
+        const transform = d3.zoomIdentity
+          .translate(width / 2, height / 2)
+          .scale(2)
+          .translate(-(node.x || 0), -(node.y || 0));
+        svg.transition().duration(750).call(zoom.transform, transform);
+      }
+    }
+
+    // Clear highlight after 3s
+    setTimeout(() => setHighlightedId(null), 3000);
+  }, [width, height]);
 
   // D3 rendering
   useEffect(() => {
-    if (!svgRef.current) return;
+    if (!svgRef.current || !data.nodes.length) return;
 
     const svg = d3.select(svgRef.current);
     svg.selectAll('*').remove();
 
-    // Defs for glow filter
+    // Defs
     const defs = svg.append('defs');
 
-    const glowFilter = defs.append('filter').attr('id', 'glow');
-    glowFilter.append('feGaussianBlur').attr('stdDeviation', '2').attr('result', 'coloredBlur');
-    const feMerge = glowFilter.append('feMerge');
-    feMerge.append('feMergeNode').attr('in', 'coloredBlur');
+    // Arrow marker for directed links
+    defs.append('marker')
+      .attr('id', 'arrowhead')
+      .attr('viewBox', '0 -4 8 8')
+      .attr('refX', 8)
+      .attr('refY', 0)
+      .attr('markerWidth', 6)
+      .attr('markerHeight', 6)
+      .attr('orient', 'auto')
+      .append('path')
+      .attr('d', 'M0,-3L8,0L0,3')
+      .attr('fill', 'rgba(255,255,255,0.25)');
+
+    // Highlighted arrow
+    defs.append('marker')
+      .attr('id', 'arrowhead-highlight')
+      .attr('viewBox', '0 -4 8 8')
+      .attr('refX', 8)
+      .attr('refY', 0)
+      .attr('markerWidth', 6)
+      .attr('markerHeight', 6)
+      .attr('orient', 'auto')
+      .append('path')
+      .attr('d', 'M0,-3L8,0L0,3')
+      .attr('fill', '#fff');
+
+    // Glow filter
+    const glow = defs.append('filter').attr('id', 'glow').attr('x', '-50%').attr('y', '-50%').attr('width', '200%').attr('height', '200%');
+    glow.append('feGaussianBlur').attr('stdDeviation', '4').attr('result', 'blur');
+    const feMerge = glow.append('feMerge');
+    feMerge.append('feMergeNode').attr('in', 'blur');
     feMerge.append('feMergeNode').attr('in', 'SourceGraphic');
 
-    // Selected glow
-    const selectedGlow = defs.append('filter').attr('id', 'selectedGlow');
-    selectedGlow.append('feGaussianBlur').attr('stdDeviation', '4').attr('result', 'coloredBlur');
-    const feMerge2 = selectedGlow.append('feMerge');
-    feMerge2.append('feMergeNode').attr('in', 'coloredBlur');
+    // Pulse filter for highlighting
+    const pulse = defs.append('filter').attr('id', 'pulse-glow').attr('x', '-100%').attr('y', '-100%').attr('width', '300%').attr('height', '300%');
+    pulse.append('feGaussianBlur').attr('stdDeviation', '8').attr('result', 'blur');
+    const feMerge2 = pulse.append('feMerge');
+    feMerge2.append('feMergeNode').attr('in', 'blur');
     feMerge2.append('feMergeNode').attr('in', 'SourceGraphic');
 
-    // Zoom container
+    // Main group
     const g = svg.append('g');
 
-    const zoom = d3.zoom<SVGSVGElement, unknown>()
-      .scaleExtent([0.1, 8])
+    // Zoom
+    const zoomBehavior = d3.zoom<SVGSVGElement, unknown>()
+      .scaleExtent([0.1, 10])
       .on('zoom', (event) => {
         g.attr('transform', event.transform);
       });
 
-    svg.call(zoom);
+    svg.call(zoomBehavior);
+    (svg.node() as any).__zoom_behavior = zoomBehavior;
 
-    // Initial zoom to center
-    const initialTransform = d3.zoomIdentity.translate(width / 2, height / 2).scale(0.75);
-    svg.call(zoom.transform, initialTransform);
+    // Center initially
+    const initTransform = d3.zoomIdentity.translate(width / 2, height / 2).scale(0.65);
+    svg.call(zoomBehavior.transform, initTransform);
+
+    // Compute radii on nodes
+    data.nodes.forEach(n => {
+      n._radius = radiusScale(n.amount);
+    });
+
+    // Cluster grouping
+    const clusterMap: Record<string, NodeDatum[]> = {};
+    data.nodes.forEach(n => {
+      const c = n.cluster || '_none';
+      if (!clusterMap[c]) clusterMap[c] = [];
+      clusterMap[c].push(n);
+    });
+    const clusterKeys = Object.keys(clusterMap);
+    const clusterCenters: Record<string, { x: number; y: number }> = {};
+    const cAngle = (2 * Math.PI) / Math.max(1, clusterKeys.length);
+    const cRadius = Math.min(width, height) * 0.35;
+    clusterKeys.forEach((key, i) => {
+      clusterCenters[key] = {
+        x: Math.cos(i * cAngle - Math.PI / 2) * cRadius,
+        y: Math.sin(i * cAngle - Math.PI / 2) * cRadius,
+      };
+    });
+
+    // Custom cluster force — tight packing
+    function clusterForce(alpha: number) {
+      data.nodes.forEach(d => {
+        const c = d.cluster || '_none';
+        const center = clusterCenters[c];
+        if (!center) return;
+        const k = alpha * 0.45; // Strong pull
+        d.vx = (d.vx || 0) + (center.x - (d.x || 0)) * k;
+        d.vy = (d.vy || 0) + (center.y - (d.y || 0)) * k;
+      });
+    }
 
     // Links
     const linkGroup = g.append('g').attr('class', 'links');
     const linkElements = linkGroup.selectAll('line')
-      .data(links)
+      .data(data.links)
       .enter()
       .append('line')
       .attr('stroke', 'rgba(255, 255, 255, 0.15)')
-      .attr('stroke-width', (d: any) => Math.max(0.5, (d.weight || 1) * 0.5));
+      .attr('stroke-width', 0.8)
+      .attr('marker-end', 'url(#arrowhead)');
 
     // Node groups
     const nodeGroup = g.append('g').attr('class', 'nodes');
-    const nodeElements = nodeGroup.selectAll('g')
-      .data(nodes)
+    const nodeElements = nodeGroup.selectAll<SVGGElement, NodeDatum>('g')
+      .data(data.nodes)
       .enter()
       .append('g')
-      .attr('class', 'node-group')
+      .attr('class', 'node-g')
       .style('cursor', 'pointer');
 
-    // Outer ring (border)
+    // Outer ring
     nodeElements.append('circle')
-      .attr('class', 'node-border')
-      .attr('r', (d: BubbleNode) => d.radius + 1.5)
+      .attr('class', 'ring')
+      .attr('r', d => (d._radius || 5) + 1.5)
       .attr('fill', 'none')
-      .attr('stroke', (d: BubbleNode) => d.borderColor)
-      .attr('stroke-width', (d: BubbleNode) => Math.max(1, d.radius * 0.06))
-      .attr('opacity', 0.7);
-
-    // Inner circle
-    nodeElements.append('circle')
-      .attr('class', 'node-circle')
-      .attr('r', (d: BubbleNode) => d.radius)
-      .attr('fill', (d: BubbleNode) => {
-        const baseColor = d3.color(d.color);
-        if (!baseColor) return d.color;
-        return baseColor.darker(0.4).toString();
+      .attr('stroke', d => {
+        const c = d3.color(d.color);
+        return c ? c.brighter(0.4).toString() : d.color;
       })
-      .attr('stroke', (d: BubbleNode) => d.color)
-      .attr('stroke-width', (d: BubbleNode) => Math.max(1.5, d.radius * 0.08))
-      .attr('opacity', 0.9);
+      .attr('stroke-width', d => Math.max(1, (d._radius || 5) * 0.07))
+      .attr('opacity', 0.6);
 
-    // Inner shine (gradient effect)
+    // Main circle
     nodeElements.append('circle')
-      .attr('class', 'node-shine')
-      .attr('r', (d: BubbleNode) => d.radius * 0.7)
-      .attr('fill', (d: BubbleNode) => d.color)
-      .attr('opacity', 0.15);
+      .attr('class', 'main-circle')
+      .attr('r', d => d._radius || 5)
+      .attr('fill', d => {
+        const c = d3.color(d.color);
+        return c ? c.darker(0.3).toString() : d.color;
+      })
+      .attr('stroke', d => d.color)
+      .attr('stroke-width', d => Math.max(1.5, (d._radius || 5) * 0.09))
+      .attr('opacity', 0.85);
 
-    // Labels for large nodes
-    nodeElements.filter((d: BubbleNode) => d.radius > 18 && d.label != null)
+    // Inner glow
+    nodeElements.append('circle')
+      .attr('r', d => (d._radius || 5) * 0.6)
+      .attr('fill', d => d.color)
+      .attr('opacity', 0.12);
+
+    // Percentage labels on large nodes
+    nodeElements.filter(d => (d._radius || 0) > 16)
       .append('text')
       .attr('text-anchor', 'middle')
-      .attr('dy', '-0.2em')
+      .attr('dy', '0.35em')
       .attr('fill', '#fff')
-      .attr('font-size', (d: BubbleNode) => `${Math.max(7, d.radius * 0.28)}px`)
+      .attr('font-size', d => `${Math.max(7, (d._radius || 10) * 0.3)}px`)
       .attr('font-weight', '600')
       .attr('pointer-events', 'none')
-      .text((d: BubbleNode) => {
-        const maxLen = Math.floor(d.radius / 4);
-        const label = d.label || '';
-        return label.length > maxLen ? label.substring(0, maxLen) + '...' : label;
-      });
+      .text(d => `${(d.percentage * 100).toFixed(1)}%`);
 
-    // Percentage labels for large nodes
-    nodeElements.filter((d: BubbleNode) => d.radius > 14)
-      .append('text')
-      .attr('text-anchor', 'middle')
-      .attr('dy', (d: BubbleNode) => d.label && d.radius > 18 ? '1em' : '0.35em')
-      .attr('fill', 'rgba(255,255,255,0.8)')
-      .attr('font-size', (d: BubbleNode) => `${Math.max(7, d.radius * 0.24)}px`)
-      .attr('font-weight', '500')
-      .attr('pointer-events', 'none')
-      .text((d: BubbleNode) => `${d.percentage.toFixed(2)}%`);
-
-    // Type indicator dot for medium+ nodes
-    nodeElements.filter((d: BubbleNode) => d.radius > 10 && d.type !== 'wallet')
+    // Type badge for exchanges and contracts
+    nodeElements.filter(d => (d._radius || 0) > 8 && (d.isExchange || !!d.isContract))
       .append('circle')
-      .attr('cx', (d: BubbleNode) => d.radius * 0.6)
-      .attr('cy', (d: BubbleNode) => -d.radius * 0.6)
-      .attr('r', (d: BubbleNode) => Math.max(3, d.radius * 0.15))
-      .attr('fill', (d: BubbleNode) => {
-        switch (d.type) {
-          case 'cex': return '#f97316';
-          case 'dex': return '#22c55e';
-          case 'contract': return '#64748b';
-          default: return '#fff';
-        }
-      })
-      .attr('stroke', '#1a1a2e')
+      .attr('cx', d => (d._radius || 5) * 0.65)
+      .attr('cy', d => -(d._radius || 5) * 0.65)
+      .attr('r', d => Math.max(2.5, (d._radius || 5) * 0.15))
+      .attr('fill', d => d.isExchange ? '#f97316' : '#10b981')
+      .attr('stroke', '#0d0d1a')
       .attr('stroke-width', 1);
 
-    // Hover and click events
+    // Hover: show address tooltip
     nodeElements
-      .on('mouseenter', function (event: MouseEvent, d: BubbleNode) {
-        d3.select(this).select('.node-circle').attr('filter', 'url(#glow)');
-        d3.select(this).select('.node-border').attr('opacity', 1).attr('stroke-width', 2.5);
+      .on('mouseenter', function (event: MouseEvent, d: NodeDatum) {
+        const rect = svgRef.current?.getBoundingClientRect();
+        if (rect) {
+          setHoveredNode(d);
+          setHoverPos({ x: event.clientX - rect.left, y: event.clientY - rect.top });
+        }
 
         // Highlight connected links
         linkElements
           .attr('stroke', (l: any) => {
-            const sourceId = typeof l.source === 'object' ? l.source.id : l.source;
-            const targetId = typeof l.target === 'object' ? l.target.id : l.target;
-            if (sourceId === d.id || targetId === d.id) return d.color;
-            return 'rgba(255, 255, 255, 0.08)';
+            const sId = typeof l.source === 'object' ? l.source.id : l.source;
+            const tId = typeof l.target === 'object' ? l.target.id : l.target;
+            return (sId === d.id || tId === d.id) ? '#fff' : 'rgba(255,255,255,0.06)';
           })
           .attr('stroke-width', (l: any) => {
-            const sourceId = typeof l.source === 'object' ? l.source.id : l.source;
-            const targetId = typeof l.target === 'object' ? l.target.id : l.target;
-            if (sourceId === d.id || targetId === d.id) return 2;
-            return Math.max(0.3, ((l.weight || 1) * 0.5));
+            const sId = typeof l.source === 'object' ? l.source.id : l.source;
+            const tId = typeof l.target === 'object' ? l.target.id : l.target;
+            return (sId === d.id || tId === d.id) ? 1.8 : 0.4;
+          })
+          .attr('marker-end', (l: any) => {
+            const sId = typeof l.source === 'object' ? l.source.id : l.source;
+            const tId = typeof l.target === 'object' ? l.target.id : l.target;
+            return (sId === d.id || tId === d.id) ? 'url(#arrowhead-highlight)' : 'url(#arrowhead)';
           });
 
-        // Dim non-connected nodes
-        nodeElements.select('.node-circle')
-          .attr('opacity', (n: any) => {
-            if (n.id === d.id) return 1;
-            const isConnected = links.some((l: any) => {
-              const sId = typeof l.source === 'object' ? (l.source as BubbleNode).id : l.source;
-              const tId = typeof l.target === 'object' ? (l.target as BubbleNode).id : l.target;
-              return (sId === d.id && tId === n.id) || (tId === d.id && sId === n.id);
-            });
-            return isConnected ? 0.9 : 0.25;
-          });
+        // Dim non-connected
+        const connectedIds = new Set<string>();
+        connectedIds.add(d.id);
+        data.links.forEach((l: any) => {
+          const sId = typeof l.source === 'object' ? l.source.id : l.source;
+          const tId = typeof l.target === 'object' ? l.target.id : l.target;
+          if (sId === d.id) connectedIds.add(tId);
+          if (tId === d.id) connectedIds.add(sId);
+        });
+        nodeElements.select('.main-circle').attr('opacity', (n: any) => connectedIds.has(n.id) ? 0.95 : 0.15);
+        nodeElements.select('.ring').attr('opacity', (n: any) => connectedIds.has(n.id) ? 0.8 : 0.08);
 
-        const rect = svgRef.current?.getBoundingClientRect();
-        if (rect) {
-          setTooltip({
-            visible: true,
-            x: event.clientX - rect.left,
-            y: event.clientY - rect.top,
-            node: d,
-          });
-        }
+        d3.select(this).select('.main-circle').attr('filter', 'url(#glow)');
       })
       .on('mousemove', function (event: MouseEvent) {
         const rect = svgRef.current?.getBoundingClientRect();
-        if (rect) {
-          setTooltip(prev => ({
-            ...prev,
-            x: event.clientX - rect.left,
-            y: event.clientY - rect.top,
-          }));
-        }
+        if (rect) setHoverPos({ x: event.clientX - rect.left, y: event.clientY - rect.top });
       })
       .on('mouseleave', function () {
-        d3.select(this).select('.node-circle').attr('filter', null);
-        d3.select(this).select('.node-border').attr('opacity', 0.7).attr('stroke-width', function (d: any) {
-          return Math.max(1, d.radius * 0.06);
-        });
+        setHoveredNode(null);
         linkElements
-          .attr('stroke', 'rgba(255, 255, 255, 0.15)')
-          .attr('stroke-width', (d: any) => Math.max(0.5, (d.weight || 1) * 0.5));
-        nodeElements.select('.node-circle').attr('opacity', 0.9);
-        setTooltip({ visible: false, x: 0, y: 0, node: null });
+          .attr('stroke', 'rgba(255,255,255,0.15)')
+          .attr('stroke-width', 0.8)
+          .attr('marker-end', 'url(#arrowhead)');
+        nodeElements.select('.main-circle').attr('opacity', 0.85).attr('filter', null);
+        nodeElements.select('.ring').attr('opacity', 0.6);
       })
-      .on('click', function (_: MouseEvent, d: BubbleNode) {
-        setSelectedNode(prev => prev?.id === d.id ? null : d);
+      .on('click', function (_: MouseEvent, d: NodeDatum) {
+        setSelectedWallet(prev => prev?.id === d.id ? null : d);
       });
 
-    // Drag behavior
-    const drag = d3.drag<SVGGElement, BubbleNode>()
+    // Drag
+    const drag = d3.drag<SVGGElement, NodeDatum>()
       .on('start', (event, d) => {
         if (!event.active) simulationRef.current?.alphaTarget(0.3).restart();
         d.fx = d.x;
@@ -335,424 +343,261 @@ const BubbleChart: React.FC<BubbleChartProps> = ({ data, width = 900, height = 7
         d.fy = null;
       });
 
-    nodeElements.call(drag as any);
+    nodeElements.call(drag);
 
-    // Cluster center positions
-    const clusterIds = Array.from(new Set(nodes.map(n => n.clusterId)));
-    const clusterCenters: Record<number, { x: number; y: number }> = {};
-    const angleStep = (2 * Math.PI) / clusterIds.length;
-    const clusterRadius = Math.min(width, height) * 0.3;
-    clusterIds.forEach((id, i) => {
-      clusterCenters[id] = {
-        x: Math.cos(i * angleStep - Math.PI / 2) * clusterRadius,
-        y: Math.sin(i * angleStep - Math.PI / 2) * clusterRadius,
-      };
-    });
-
-    // Force simulation
-    const simulation = d3.forceSimulation<BubbleNode>(nodes)
-      .force('link', d3.forceLink<BubbleNode, BubbleLink>(links)
+    // Simulation
+    const simulation = d3.forceSimulation<NodeDatum>(data.nodes)
+      .force('link', d3.forceLink<NodeDatum, LinkDatum>(data.links)
         .id(d => d.id)
         .distance(d => {
-          const src = d.source as BubbleNode;
-          const tgt = d.target as BubbleNode;
-          return (src.radius + tgt.radius) * 1.3 + 15;
+          const s = d.source as NodeDatum;
+          const t = d.target as NodeDatum;
+          return ((s._radius || 5) + (t._radius || 5)) * 1.1 + 8;
         })
         .strength(d => {
-          const src = d.source as BubbleNode;
-          const tgt = d.target as BubbleNode;
-          return src.clusterId === tgt.clusterId ? 0.8 : 0.1;
+          const s = d.source as NodeDatum;
+          const t = d.target as NodeDatum;
+          return s.cluster === t.cluster ? 1.0 : 0.08;
         })
       )
-      .force('charge', d3.forceManyBody<BubbleNode>()
-        .strength(d => -d.radius * 3)
+      .force('charge', d3.forceManyBody<NodeDatum>().strength(d => -(d._radius || 5) * 2.5))
+      .force('collide', d3.forceCollide<NodeDatum>()
+        .radius(d => (d._radius || 5) + 2)
+        .strength(1)
+        .iterations(4)
       )
-      .force('collide', d3.forceCollide<BubbleNode>()
-        .radius(d => d.radius + 3)
-        .strength(0.9)
-        .iterations(3)
-      )
-      .force('cluster', (alpha: number) => {
-        nodes.forEach(d => {
-          const center = clusterCenters[d.clusterId];
-          if (center) {
-            const k = alpha * 0.3;
-            d.vx = (d.vx || 0) + (center.x - (d.x || 0)) * k;
-            d.vy = (d.vy || 0) + (center.y - (d.y || 0)) * k;
-          }
-        });
-      })
-      .force('center', d3.forceCenter(0, 0).strength(0.05))
+      .force('cluster', clusterForce)
+      .force('center', d3.forceCenter(0, 0).strength(0.03))
       .alpha(1)
-      .alphaDecay(0.015)
+      .alphaDecay(0.018)
       .velocityDecay(0.35)
       .on('tick', () => {
         linkElements
           .attr('x1', (d: any) => d.source.x)
           .attr('y1', (d: any) => d.source.y)
-          .attr('x2', (d: any) => d.target.x)
-          .attr('y2', (d: any) => d.target.y);
+          .attr('x2', (d: any) => {
+            // Shorten line to stop at target circle edge (for arrow)
+            const dx = d.target.x - d.source.x;
+            const dy = d.target.y - d.source.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist === 0) return d.target.x;
+            const r = d.target._radius || 5;
+            return d.target.x - (dx / dist) * (r + 3);
+          })
+          .attr('y2', (d: any) => {
+            const dx = d.target.x - d.source.x;
+            const dy = d.target.y - d.source.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist === 0) return d.target.y;
+            const r = d.target._radius || 5;
+            return d.target.y - (dy / dist) * (r + 3);
+          });
 
-        nodeElements.attr('transform', (d: BubbleNode) => `translate(${d.x},${d.y})`);
+        nodeElements.attr('transform', (d: NodeDatum) => `translate(${d.x},${d.y})`);
       });
 
     simulationRef.current = simulation;
 
-    return () => {
-      simulation.stop();
-    };
-  }, [nodes, links, width, height]);
+    return () => { simulation.stop(); };
+  }, [data, width, height, radiusScale]);
 
-  // Highlight from sidebar hover
+  // Highlight effect from sidebar click
   useEffect(() => {
-    if (!svgRef.current) return;
+    if (!svgRef.current || !highlightedId) return;
     const svg = d3.select(svgRef.current);
 
-    if (hoveredListItem) {
-      svg.selectAll('.node-group').select('.node-circle')
-        .attr('opacity', (d: any) => d.id === hoveredListItem ? 1 : 0.2);
-      svg.selectAll('.node-group').select('.node-border')
-        .attr('opacity', (d: any) => d.id === hoveredListItem ? 1 : 0.15)
-        .attr('stroke-width', (d: any) => d.id === hoveredListItem ? 3 : Math.max(1, d.radius * 0.06));
-      svg.selectAll('.node-group').filter((d: any) => d.id === hoveredListItem)
-        .select('.node-circle').attr('filter', 'url(#selectedGlow)');
-    } else {
-      svg.selectAll('.node-group').select('.node-circle')
-        .attr('opacity', 0.9)
-        .attr('filter', null);
-      svg.selectAll('.node-group').select('.node-border')
-        .attr('opacity', 0.7)
-        .attr('stroke-width', (d: any) => Math.max(1, d.radius * 0.06));
-    }
-  }, [hoveredListItem]);
+    // Add pulse animation
+    svg.selectAll('.node-g').select('.ring')
+      .attr('stroke-width', (d: any) => d.id === highlightedId ? 4 : Math.max(1, (d._radius || 5) * 0.07))
+      .attr('opacity', (d: any) => d.id === highlightedId ? 1 : 0.6);
+
+    svg.selectAll('.node-g').select('.main-circle')
+      .attr('filter', (d: any) => d.id === highlightedId ? 'url(#pulse-glow)' : null)
+      .attr('opacity', (d: any) => d.id === highlightedId ? 1 : 0.85);
+
+    return () => {
+      svg.selectAll('.node-g').select('.ring')
+        .attr('stroke-width', (d: any) => Math.max(1, (d._radius || 5) * 0.07))
+        .attr('opacity', 0.6);
+      svg.selectAll('.node-g').select('.main-circle')
+        .attr('filter', null)
+        .attr('opacity', 0.85);
+    };
+  }, [highlightedId]);
 
   return (
     <div ref={containerRef} style={{
-      display: 'flex',
-      width: '100%',
-      height: '100vh',
-      background: '#0d0d1a',
-      fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
-      color: '#fff',
-      overflow: 'hidden',
-      position: 'relative',
+      display: 'flex', width: '100%', height: '100vh',
+      background: '#0a0a18', fontFamily: "'Inter', -apple-system, sans-serif",
+      color: '#fff', overflow: 'hidden', position: 'relative',
     }}>
-      {/* Main chart area */}
+      {/* Chart area */}
       <div style={{ flex: 1, position: 'relative' }}>
-        {/* Token info badge */}
-        <div style={{
-          position: 'absolute',
-          top: 16,
-          left: 16,
-          background: 'rgba(30, 30, 60, 0.9)',
-          borderRadius: 12,
-          padding: '12px 18px',
-          border: '1px solid rgba(255,255,255,0.1)',
-          backdropFilter: 'blur(10px)',
-          zIndex: 10,
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <span style={{ fontSize: 24 }}>{data.tokenImage || '🪙'}</span>
-            <div>
-              <div style={{ fontWeight: 700, fontSize: 16 }}>
-                {data.tokenSymbol} <span style={{ fontWeight: 400, color: 'rgba(255,255,255,0.6)', fontSize: 13 }}>{data.tokenName}</span>
+        {/* Selected wallet detail card — top left */}
+        {selectedWallet && (
+          <div style={{
+            position: 'absolute', top: 16, left: 16, width: 280,
+            background: 'rgba(20, 20, 45, 0.95)', border: `1px solid ${selectedWallet.color}`,
+            borderRadius: 10, zIndex: 20, backdropFilter: 'blur(10px)',
+            boxShadow: `0 4px 20px rgba(0,0,0,0.5), 0 0 12px ${selectedWallet.color}22`,
+          }}>
+            <div style={{
+              padding: '12px 16px', borderBottom: '1px solid rgba(255,255,255,0.1)',
+              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+            }}>
+              <span style={{ fontWeight: 700, fontSize: 13, color: selectedWallet.color }}>
+                #{selectedWallet.rank} {selectedWallet.isExchange ? '⭐' : selectedWallet.isContract ? '📄' : '👛'}
+              </span>
+              <button onClick={() => setSelectedWallet(null)} style={{
+                background: 'none', border: 'none', color: 'rgba(255,255,255,0.5)',
+                cursor: 'pointer', fontSize: 16, fontFamily: 'inherit',
+              }}>✕</button>
+            </div>
+            <div style={{ padding: '12px 16px' }}>
+              <div style={{
+                fontFamily: 'monospace', fontSize: 12, color: 'rgba(255,255,255,0.7)',
+                wordBreak: 'break-all', marginBottom: 10,
+                display: 'flex', alignItems: 'center', gap: 8,
+              }}>
+                {selectedWallet.id}
+                <button onClick={() => navigator.clipboard?.writeText(selectedWallet.id)} style={{
+                  background: 'rgba(255,255,255,0.08)', border: 'none', color: '#fff',
+                  cursor: 'pointer', padding: '2px 6px', borderRadius: 4, fontSize: 10,
+                }}>Copy</button>
               </div>
-              <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.5)' }}>
-                Top {data.holders.length} Holders + {data.totalHolders - data.holders.length}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                <div style={{ background: 'rgba(255,255,255,0.05)', borderRadius: 8, padding: '8px 10px' }}>
+                  <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.4)' }}>Percentage</div>
+                  <div style={{ fontSize: 15, fontWeight: 700 }}>{(selectedWallet.percentage * 100).toFixed(3)}%</div>
+                </div>
+                <div style={{ background: 'rgba(255,255,255,0.05)', borderRadius: 8, padding: '8px 10px' }}>
+                  <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.4)' }}>Amount</div>
+                  <div style={{ fontSize: 15, fontWeight: 700 }}>{formatNumber(selectedWallet.amount)}</div>
+                </div>
+                <div style={{ background: 'rgba(255,255,255,0.05)', borderRadius: 8, padding: '8px 10px' }}>
+                  <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.4)' }}>Type</div>
+                  <div style={{ fontSize: 12, fontWeight: 600 }}>
+                    {selectedWallet.isExchange ? 'Exchange' : selectedWallet.isContract ? 'Contract' : 'Wallet'}
+                  </div>
+                </div>
+                <div style={{ background: 'rgba(255,255,255,0.05)', borderRadius: 8, padding: '8px 10px' }}>
+                  <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.4)' }}>Cluster</div>
+                  <div style={{ fontSize: 12, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: selectedWallet.color }} />
+                    {selectedWallet.clusterPercentage != null ? `${(selectedWallet.clusterPercentage * 100).toFixed(1)}%` : '—'}
+                  </div>
+                </div>
               </div>
+              <button style={{
+                width: '100%', marginTop: 10, padding: '8px', borderRadius: 6,
+                background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.15)',
+                color: '#fff', cursor: 'pointer', fontSize: 11, fontWeight: 600,
+                fontFamily: 'inherit',
+              }}>SHOW TRANSFERS</button>
             </div>
           </div>
-        </div>
+        )}
 
         {/* Legend */}
         <div style={{
-          position: 'absolute',
-          bottom: 16,
-          left: 16,
-          display: 'flex',
-          gap: 16,
-          fontSize: 11,
-          color: 'rgba(255,255,255,0.6)',
-          zIndex: 10,
+          position: 'absolute', bottom: 16, left: 16, display: 'flex',
+          gap: 16, fontSize: 11, color: 'rgba(255,255,255,0.6)', zIndex: 10,
         }}>
-          <span>● Wallets</span>
-          <span style={{ color: '#f97316' }}>◈ CEX</span>
-          <span style={{ color: '#22c55e' }}>⬡ DEX</span>
-          <span style={{ color: '#64748b' }}>▣ Contracts</span>
+          <span><span style={{ color: '#8a5cf6' }}>●</span> Wallets</span>
+          <span><span style={{ color: '#f59e0b' }}>●</span> Exchanges</span>
+          <span><span style={{ color: '#10b981' }}>●</span> Contracts</span>
         </div>
 
-        <svg
-          ref={svgRef}
-          width="100%"
-          height="100%"
-          viewBox={`0 0 ${width} ${height}`}
-          style={{ background: 'transparent' }}
-        />
+        <svg ref={svgRef} width="100%" height="100%" viewBox={`0 0 ${width} ${height}`} style={{ background: 'transparent' }} />
 
-        {/* Tooltip */}
-        {tooltip.visible && tooltip.node && (
+        {/* Hover tooltip — address only */}
+        {hoveredNode && (
           <div style={{
             position: 'absolute',
-            left: Math.min(tooltip.x + 15, width - 260),
-            top: Math.min(tooltip.y - 10, height - 160),
-            background: 'rgba(20, 20, 45, 0.95)',
-            border: `1px solid ${tooltip.node.color}`,
-            borderRadius: 10,
-            padding: '12px 16px',
-            fontSize: 12,
-            pointerEvents: 'none',
-            zIndex: 100,
-            minWidth: 220,
-            backdropFilter: 'blur(10px)',
-            boxShadow: `0 4px 20px rgba(0,0,0,0.5), 0 0 15px ${tooltip.node.color}33`,
+            left: Math.min(hoverPos.x + 14, width - 200),
+            top: hoverPos.y - 36,
+            background: 'rgba(15, 15, 35, 0.92)',
+            border: `1px solid ${hoveredNode.color}`,
+            borderRadius: 6, padding: '6px 12px', fontSize: 12,
+            pointerEvents: 'none', zIndex: 50, fontFamily: 'monospace',
+            backdropFilter: 'blur(8px)',
+            boxShadow: `0 2px 12px rgba(0,0,0,0.4)`,
+            whiteSpace: 'nowrap',
           }}>
-            <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 6, color: tooltip.node.color }}>
-              {tooltip.node.label || tooltip.node.address}
-            </div>
-            {tooltip.node.label && (
-              <div style={{ color: 'rgba(255,255,255,0.5)', fontSize: 11, marginBottom: 6, fontFamily: 'monospace' }}>
-                {tooltip.node.address}
-              </div>
-            )}
-            <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '4px 12px' }}>
-              <span style={{ color: 'rgba(255,255,255,0.5)' }}>Supply:</span>
-              <span style={{ fontWeight: 600 }}>{tooltip.node.percentage.toFixed(2)}%</span>
-              <span style={{ color: 'rgba(255,255,255,0.5)' }}>Balance:</span>
-              <span>{formatNumber(tooltip.node.balance)}</span>
-              {tooltip.node.balanceUSD && (
-                <>
-                  <span style={{ color: 'rgba(255,255,255,0.5)' }}>Value:</span>
-                  <span style={{ color: '#22c55e' }}>{formatUSD(tooltip.node.balanceUSD)}</span>
-                </>
-              )}
-              <span style={{ color: 'rgba(255,255,255,0.5)' }}>Type:</span>
-              <span>
-                <span style={{
-                  background: tooltip.node.color + '33',
-                  color: tooltip.node.color,
-                  padding: '1px 8px',
-                  borderRadius: 4,
-                  fontSize: 11,
-                }}>{TYPE_LABELS[tooltip.node.type]}</span>
-              </span>
-              <span style={{ color: 'rgba(255,255,255,0.5)' }}>Cluster:</span>
-              <span>
-                <span style={{
-                  display: 'inline-block',
-                  width: 8,
-                  height: 8,
-                  borderRadius: '50%',
-                  background: tooltip.node.color,
-                  marginRight: 6,
-                }} />
-                #{tooltip.node.clusterId}
-              </span>
-            </div>
+            {hoveredNode.name || formatAddr(hoveredNode.id)}
           </div>
         )}
       </div>
 
       {/* Sidebar */}
       <div style={{
-        width: 320,
-        background: 'rgba(15, 15, 35, 0.95)',
+        width: 320, background: 'rgba(15, 15, 35, 0.95)',
         borderLeft: '1px solid rgba(255,255,255,0.08)',
-        display: 'flex',
-        flexDirection: 'column',
-        height: '100%',
-        overflow: 'hidden',
+        display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden',
       }}>
-        {/* Header */}
-        <div style={{
-          padding: '16px 20px',
-          borderBottom: '1px solid rgba(255,255,255,0.08)',
-        }}>
-          <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>Address List</h2>
+        <div style={{ padding: '16px 20px', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+          <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>Wallets List</h2>
         </div>
 
-        {/* Search */}
         <div style={{ padding: '12px 16px' }}>
           <input
-            type="text"
-            placeholder="Search wallets..."
-            value={searchTerm}
-            onChange={e => setSearchTerm(e.target.value)}
+            type="text" placeholder="Search Wallets"
+            value={searchTerm} onChange={e => setSearchTerm(e.target.value)}
             style={{
-              width: '100%',
-              padding: '10px 14px',
-              borderRadius: 8,
+              width: '100%', padding: '10px 14px', borderRadius: 8,
               border: '1px solid rgba(255,255,255,0.12)',
-              background: 'rgba(255,255,255,0.05)',
-              color: '#fff',
-              fontSize: 13,
-              outline: 'none',
-              boxSizing: 'border-box',
+              background: 'rgba(255,255,255,0.05)', color: '#fff',
+              fontSize: 13, outline: 'none', boxSizing: 'border-box',
+              fontFamily: 'inherit',
             }}
           />
         </div>
 
-        {/* Filters */}
-        <div style={{
-          padding: '0 16px 12px',
-          display: 'flex',
-          gap: 6,
-          flexWrap: 'wrap',
-        }}>
-          {(['wallet', 'cex', 'dex', 'contract'] as const).map(type => (
-            <button
-              key={type}
-              onClick={() => toggleFilter(type)}
-              style={{
-                padding: '4px 12px',
-                borderRadius: 6,
-                border: `1px solid ${activeFilters.has(type) ? 'rgba(255,255,255,0.3)' : 'rgba(255,255,255,0.1)'}`,
-                background: activeFilters.has(type) ? 'rgba(255,255,255,0.1)' : 'transparent',
-                color: activeFilters.has(type) ? '#fff' : 'rgba(255,255,255,0.4)',
-                fontSize: 11,
-                cursor: 'pointer',
-                transition: 'all 0.2s',
-                fontFamily: 'inherit',
-              }}
-            >
-              {TYPE_ICONS[type]} {TYPE_LABELS[type]}
-            </button>
-          ))}
-        </div>
-
-        {/* List */}
-        <div style={{
-          flex: 1,
-          overflowY: 'auto',
-          padding: '0 8px',
-        }}>
-          {filteredHolders.map((node, i) => (
+        <div style={{ flex: 1, overflowY: 'auto', padding: '0 8px' }}>
+          {filteredWallets.map((wallet) => (
             <div
-              key={node.id}
-              onMouseEnter={() => setHoveredListItem(node.id)}
-              onMouseLeave={() => setHoveredListItem(null)}
-              onClick={() => setSelectedNode(prev => prev?.id === node.id ? null : node)}
+              key={wallet.id}
+              onClick={() => handleSidebarClick(wallet)}
               style={{
-                display: 'flex',
-                alignItems: 'center',
-                padding: '8px 12px',
-                borderRadius: 8,
-                cursor: 'pointer',
-                transition: 'background 0.15s',
-                background: selectedNode?.id === node.id
-                  ? 'rgba(255,255,255,0.08)'
-                  : hoveredListItem === node.id
-                  ? 'rgba(255,255,255,0.04)'
-                  : 'transparent',
-                borderLeft: `3px solid ${node.color}`,
-                marginBottom: 2,
+                display: 'flex', alignItems: 'center', padding: '8px 12px',
+                borderRadius: 8, cursor: 'pointer', transition: 'background 0.15s',
+                background: selectedWallet?.id === wallet.id ? 'rgba(255,255,255,0.08)' : 'transparent',
+                borderLeft: `3px solid ${wallet.color}`, marginBottom: 2,
               }}
             >
               <span style={{
-                color: 'rgba(255,255,255,0.35)',
-                fontSize: 11,
-                width: 28,
-                flexShrink: 0,
-                fontWeight: 500,
-              }}>
-                #{i + 1}
-              </span>
+                color: 'rgba(255,255,255,0.35)', fontSize: 11, width: 30,
+                flexShrink: 0, fontWeight: 500,
+              }}>#{wallet.rank}</span>
 
               <span style={{
-                width: 20,
-                height: 20,
-                borderRadius: '50%',
-                background: node.color + '33',
-                border: `1.5px solid ${node.color}`,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                fontSize: 10,
-                marginRight: 10,
-                flexShrink: 0,
+                width: 18, height: 18, borderRadius: '50%',
+                background: wallet.color + '33', border: `1.5px solid ${wallet.color}`,
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                fontSize: 9, marginRight: 10, flexShrink: 0,
               }}>
-                {TYPE_ICONS[node.type]}
+                {wallet.isExchange ? '⭐' : wallet.isContract ? '📄' : '●'}
               </span>
 
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{
-                  fontSize: 12,
-                  fontWeight: node.label ? 600 : 400,
-                  whiteSpace: 'nowrap',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  color: node.label ? '#fff' : 'rgba(255,255,255,0.7)',
+                  fontSize: 12, whiteSpace: 'nowrap', overflow: 'hidden',
+                  textOverflow: 'ellipsis', color: 'rgba(255,255,255,0.8)',
+                  fontFamily: 'monospace',
                 }}>
-                  {node.label || node.address}
+                  {wallet.name}
                 </div>
               </div>
 
               <span style={{
-                fontSize: 12,
-                fontWeight: 700,
-                color: node.color,
-                marginLeft: 8,
-                flexShrink: 0,
+                fontSize: 12, fontWeight: 700, color: wallet.color,
+                marginLeft: 8, flexShrink: 0,
               }}>
-                {node.percentage.toFixed(2)}%
+                {(wallet.percentage * 100).toFixed(2)}%
               </span>
             </div>
           ))}
         </div>
-
-        {/* Selected node detail panel */}
-        {selectedNode && (
-          <div style={{
-            padding: 16,
-            borderTop: '1px solid rgba(255,255,255,0.1)',
-            background: 'rgba(20, 20, 45, 0.95)',
-          }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-              <span style={{ fontWeight: 700, fontSize: 14, color: selectedNode.color }}>
-                {selectedNode.label || 'Unknown Wallet'}
-              </span>
-              <button
-                onClick={() => setSelectedNode(null)}
-                style={{
-                  background: 'none',
-                  border: 'none',
-                  color: 'rgba(255,255,255,0.5)',
-                  cursor: 'pointer',
-                  fontSize: 16,
-                  fontFamily: 'inherit',
-                }}>✕</button>
-            </div>
-            <div style={{ fontFamily: 'monospace', fontSize: 11, color: 'rgba(255,255,255,0.5)', marginBottom: 8, wordBreak: 'break-all' }}>
-              {selectedNode.address}
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-              <div style={{ background: 'rgba(255,255,255,0.05)', borderRadius: 8, padding: '8px 12px' }}>
-                <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.4)' }}>Supply</div>
-                <div style={{ fontSize: 16, fontWeight: 700 }}>{selectedNode.percentage.toFixed(2)}%</div>
-              </div>
-              <div style={{ background: 'rgba(255,255,255,0.05)', borderRadius: 8, padding: '8px 12px' }}>
-                <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.4)' }}>Value</div>
-                <div style={{ fontSize: 16, fontWeight: 700, color: '#22c55e' }}>
-                  {selectedNode.balanceUSD ? formatUSD(selectedNode.balanceUSD) : 'N/A'}
-                </div>
-              </div>
-              <div style={{ background: 'rgba(255,255,255,0.05)', borderRadius: 8, padding: '8px 12px' }}>
-                <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.4)' }}>Balance</div>
-                <div style={{ fontSize: 13, fontWeight: 600 }}>{formatNumber(selectedNode.balance)}</div>
-              </div>
-              <div style={{ background: 'rgba(255,255,255,0.05)', borderRadius: 8, padding: '8px 12px' }}>
-                <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.4)' }}>Type</div>
-                <div style={{ fontSize: 13, fontWeight: 600 }}>
-                  <span style={{
-                    background: selectedNode.color + '33',
-                    color: selectedNode.color,
-                    padding: '2px 8px',
-                    borderRadius: 4,
-                  }}>{TYPE_LABELS[selectedNode.type]}</span>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
       </div>
     </div>
   );

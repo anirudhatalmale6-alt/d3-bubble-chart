@@ -1,4 +1,5 @@
 import React from 'react';
+import './App.css';
 import BubbleChart from './components/BubbleChart';
 import { SAMPLE_DATA } from './components/sampleData';
 
