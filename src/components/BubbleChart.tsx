@@ -310,25 +310,17 @@ const BubbleChart: React.FC<BubbleChartProps> = ({ data, width: propWidth, heigh
           setHoverPos({ x: event.clientX - rect.left, y: event.clientY - rect.top });
         }
 
-        // Highlight connected
-        const connectedIds = new Set<string>([d.id]);
-        links.forEach((l: any) => {
-          const sId = typeof l.source === 'object' ? l.source.id : l.source;
-          const tId = typeof l.target === 'object' ? l.target.id : l.target;
-          if (sId === d.id) connectedIds.add(tId);
-          if (tId === d.id) connectedIds.add(sId);
-        });
-
+        // Highlight connected links only, don't dim other nodes
         linkLines
           .attr('stroke', (l: any) => {
             const sId = typeof l.source === 'object' ? l.source.id : l.source;
             const tId = typeof l.target === 'object' ? l.target.id : l.target;
-            return (sId === d.id || tId === d.id) ? '#fff' : 'rgba(255,255,255,0.04)';
+            return (sId === d.id || tId === d.id) ? '#fff' : 'rgba(255,255,255,0.12)';
           })
           .attr('stroke-width', (l: any) => {
             const sId = typeof l.source === 'object' ? l.source.id : l.source;
             const tId = typeof l.target === 'object' ? l.target.id : l.target;
-            return (sId === d.id || tId === d.id) ? 1.8 : 0.3;
+            return (sId === d.id || tId === d.id) ? 1.8 : 0.7;
           })
           .attr('marker-end', (l: any) => {
             const sId = typeof l.source === 'object' ? l.source.id : l.source;
@@ -336,12 +328,9 @@ const BubbleChart: React.FC<BubbleChartProps> = ({ data, width: propWidth, heigh
             return (sId === d.id || tId === d.id) ? 'url(#arrow-hl)' : 'url(#arrow)';
           });
 
-        nodeElements.select('.main-circle')
-          .attr('opacity', (n: any) => connectedIds.has(n.id) ? 0.95 : 0.12);
-        nodeElements.select('.ring')
-          .attr('opacity', (n: any) => connectedIds.has(n.id) ? 0.8 : 0.05);
-
-        d3.select(this).select('.main-circle').attr('filter', 'url(#glow)');
+        // Only glow the hovered node
+        d3.select(this).select('.main-circle').attr('filter', 'url(#glow)').attr('opacity', 1);
+        d3.select(this).select('.ring').attr('opacity', 1).attr('stroke-width', 3);
       })
       .on('mousemove', function (event: MouseEvent) {
         const rect = svgRef.current?.getBoundingClientRect();
@@ -358,7 +347,9 @@ const BubbleChart: React.FC<BubbleChartProps> = ({ data, width: propWidth, heigh
             return (atob > 0 || btoa_val > 0) ? 'url(#arrow)' : '';
           });
         nodeElements.select('.main-circle').attr('opacity', 0.85).attr('filter', null);
-        nodeElements.select('.ring').attr('opacity', 0.6);
+        nodeElements.select('.ring')
+          .attr('opacity', 0.6)
+          .attr('stroke-width', (d: any) => Math.max(1, (d._radius || 5) * 0.07));
       })
       .on('click', function (_: MouseEvent, d: NodeDatum) {
         setSelectedWallet(prev => prev?.id === d.id ? null : d);
