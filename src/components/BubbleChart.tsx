@@ -50,43 +50,54 @@ const BubbleChart: React.FC<BubbleChartProps> = ({ data, width: propWidth, heigh
 
   const { width, height } = dimensions;
 
-  // Run cluster detection on data
+  // Process data: detect clusters, separate chart nodes from sidebar nodes
   const processedData = useMemo(() => {
-    // Deep copy to avoid mutating props
-    const nodes: NodeDatum[] = data.nodes.map(n => ({ ...n }));
+    const allNodes: NodeDatum[] = data.nodes.map(n => ({ ...n }));
     const links: LinkDatum[] = data.links.map(l => ({ ...l }));
 
     // Sort by percentage descending and assign ranks
-    nodes.sort((a, b) => b.percentage - a.percentage);
-    nodes.forEach((n, i) => { n.rank = i + 1; });
+    allNodes.sort((a, b) => b.percentage - a.percentage);
+    allNodes.forEach((n, i) => { n.rank = i + 1; });
 
-    // Detect clusters from link graph
-    detectClusters(nodes, links);
+    // Detect clusters from link graph (uses ALL nodes for connectivity)
+    detectClusters(allNodes, links);
 
-    return { nodes, links };
+    // Chart nodes = non-exchange only
+    const chartNodes = allNodes.filter(n => !n.isExchange);
+
+    // Filter links to only include non-exchange nodes
+    const chartNodeIds = new Set(chartNodes.map(n => n.id));
+    const chartLinks = links.filter(l => {
+      const sId = typeof l.source === 'string' ? l.source : (l.source as NodeDatum).id;
+      const tId = typeof l.target === 'string' ? l.target : (l.target as NodeDatum).id;
+      return chartNodeIds.has(sId) && chartNodeIds.has(tId);
+    });
+
+    return { allNodes, chartNodes, chartLinks, links };
   }, [data]);
 
-  // Filtered list for sidebar
+  // Sidebar always shows ALL nodes (including exchanges)
   const filteredWallets = useMemo(() => {
-    if (!searchTerm) return processedData.nodes;
+    if (!searchTerm) return processedData.allNodes;
     const term = searchTerm.toLowerCase();
-    return processedData.nodes.filter(w =>
+    return processedData.allNodes.filter(w =>
       w.name.toLowerCase().includes(term) || w.id.toLowerCase().includes(term)
     );
-  }, [processedData.nodes, searchTerm]);
+  }, [processedData.allNodes, searchTerm]);
 
-  // Radius scale
+  // Radius scale based on chart nodes only
   const radiusScale = useMemo(() => {
-    const maxAmt = d3.max(processedData.nodes, d => d.amount) || 1;
+    const maxAmt = d3.max(processedData.chartNodes, d => d.amount) || 1;
     return d3.scaleSqrt().domain([0, maxAmt]).range([3, 50]);
-  }, [processedData.nodes]);
+  }, [processedData.chartNodes]);
 
-  // Click on sidebar → highlight + zoom
+  // Click on sidebar → highlight + zoom (only works for chart nodes)
   const handleSidebarClick = useCallback((node: NodeDatum) => {
     setSelectedWallet(node);
-    setHighlightedId(node.id);
 
-    if (svgRef.current && node.x != null && node.y != null) {
+    // Only zoom if node is on chart (not exchange)
+    if (!node.isExchange && svgRef.current && node.x != null && node.y != null) {
+      setHighlightedId(node.id);
       const svg = d3.select(svgRef.current);
       const zoom = (svg.node() as any).__zoom_behavior;
       if (zoom) {
@@ -96,52 +107,47 @@ const BubbleChart: React.FC<BubbleChartProps> = ({ data, width: propWidth, heigh
           .translate(-(node.x || 0), -(node.y || 0));
         svg.transition().duration(750).call(zoom.transform, transform);
       }
+      setTimeout(() => setHighlightedId(null), 3000);
     }
-
-    setTimeout(() => setHighlightedId(null), 3000);
   }, [width, height]);
 
-  // D3 rendering
+  // D3 rendering — uses chartNodes and chartLinks (no exchanges)
   useEffect(() => {
-    if (!svgRef.current || !processedData.nodes.length) return;
+    if (!svgRef.current || !processedData.chartNodes.length) return;
 
-    const { nodes, links } = processedData;
+    const { chartNodes: nodes, chartLinks: links } = processedData;
     const svg = d3.select(svgRef.current);
     svg.selectAll('*').remove();
 
     // Defs
     const defs = svg.append('defs');
 
-    // Arrow markers — one default and one highlighted
+    // Arrow markers
     const makeArrow = (id: string, fill: string) => {
       defs.append('marker')
         .attr('id', id)
         .attr('viewBox', '0 -4 8 8')
-        .attr('refX', 8)
-        .attr('refY', 0)
-        .attr('markerWidth', 5)
-        .attr('markerHeight', 5)
+        .attr('refX', 8).attr('refY', 0)
+        .attr('markerWidth', 5).attr('markerHeight', 5)
         .attr('orient', 'auto')
-        .append('path')
-        .attr('d', 'M0,-3L8,0L0,3')
-        .attr('fill', fill);
+        .append('path').attr('d', 'M0,-3L8,0L0,3').attr('fill', fill);
     };
     makeArrow('arrow', 'rgba(255,255,255,0.2)');
     makeArrow('arrow-hl', '#fff');
 
-    // Glow
+    // Glow filter for hover
     const glow = defs.append('filter').attr('id', 'glow').attr('x', '-50%').attr('y', '-50%').attr('width', '200%').attr('height', '200%');
     glow.append('feGaussianBlur').attr('stdDeviation', '4').attr('result', 'blur');
-    const m = glow.append('feMerge');
-    m.append('feMergeNode').attr('in', 'blur');
-    m.append('feMergeNode').attr('in', 'SourceGraphic');
+    const fm = glow.append('feMerge');
+    fm.append('feMergeNode').attr('in', 'blur');
+    fm.append('feMergeNode').attr('in', 'SourceGraphic');
 
     // Pulse glow for sidebar highlight
     const pulse = defs.append('filter').attr('id', 'pulse').attr('x', '-100%').attr('y', '-100%').attr('width', '300%').attr('height', '300%');
     pulse.append('feGaussianBlur').attr('stdDeviation', '8').attr('result', 'blur');
-    const m2 = pulse.append('feMerge');
-    m2.append('feMergeNode').attr('in', 'blur');
-    m2.append('feMergeNode').attr('in', 'SourceGraphic');
+    const fm2 = pulse.append('feMerge');
+    fm2.append('feMergeNode').attr('in', 'blur');
+    fm2.append('feMergeNode').attr('in', 'SourceGraphic');
 
     // Main group
     const g = svg.append('g');
@@ -153,13 +159,12 @@ const BubbleChart: React.FC<BubbleChartProps> = ({ data, width: propWidth, heigh
     svg.call(zoomBehavior);
     (svg.node() as any).__zoom_behavior = zoomBehavior;
 
-    // Initial transform
     svg.call(zoomBehavior.transform, d3.zoomIdentity.translate(width / 2, height / 2).scale(0.6));
 
     // Assign radii
     nodes.forEach(n => { n._radius = radiusScale(n.amount); });
 
-    // Cluster centers
+    // Cluster centers — tighter packing, more spread between clusters
     const clusterMap: Record<number, NodeDatum[]> = {};
     nodes.forEach(n => {
       const c = n._cluster ?? 0;
@@ -168,78 +173,38 @@ const BubbleChart: React.FC<BubbleChartProps> = ({ data, width: propWidth, heigh
     });
     const clusterKeys = Object.keys(clusterMap).map(Number);
     const clusterCenters: Record<number, { x: number; y: number }> = {};
-    const cAngle = (2 * Math.PI) / Math.max(1, clusterKeys.length);
-    // Layout clusters in a spiral pattern for more organic spread
     const totalClusters = clusterKeys.length;
     clusterKeys.forEach((key, i) => {
-      // Spiral layout: bigger clusters closer to center, smaller ones radiate out
-      const clusterSize = clusterMap[key]?.length || 1;
-      const spiralAngle = i * 2.4; // golden angle-ish
-      const baseRadius = Math.min(width, height) * 0.2;
-      const spiralRadius = baseRadius + (i / totalClusters) * baseRadius * 1.5;
+      const spiralAngle = i * 2.4; // golden angle
+      const baseRadius = Math.min(width, height) * 0.25;
+      const spiralRadius = baseRadius + (i / Math.max(1, totalClusters)) * baseRadius * 2;
       clusterCenters[key] = {
         x: Math.cos(spiralAngle) * spiralRadius,
         y: Math.sin(spiralAngle) * spiralRadius,
       };
     });
 
-    // Custom cluster force
+    // Custom cluster force — strong pull to keep clusters tight
     function clusterForce(alpha: number) {
       nodes.forEach(d => {
         const c = d._cluster ?? 0;
         const center = clusterCenters[c];
         if (!center) return;
-        const k = alpha * 0.35;
+        const k = alpha * 0.5;
         d.vx = (d.vx || 0) + (center.x - (d.x || 0)) * k;
         d.vy = (d.vy || 0) + (center.y - (d.y || 0)) * k;
       });
     }
 
-    // For each link, determine primary direction from atob/btoa
-    // We'll draw two lines if bidirectional, or one if unidirectional
-    // Build expanded link data for directed rendering
-    interface DirectedLink {
-      sourceNode: string;
-      targetNode: string;
-      amount: number;
-      linkRef: LinkDatum;
-    }
-    const directedLinks: DirectedLink[] = [];
-    links.forEach(l => {
-      const sId = typeof l.source === 'object' ? (l.source as NodeDatum).id : l.source as string;
-      const tId = typeof l.target === 'object' ? (l.target as NodeDatum).id : l.target as string;
-      const atob = (l as any).atob || 0;
-      const btoa = (l as any).btoa || 0;
-
-      if (atob > 0) {
-        directedLinks.push({ sourceNode: sId, targetNode: tId, amount: atob, linkRef: l });
-      }
-      if (btoa > 0) {
-        directedLinks.push({ sourceNode: tId, targetNode: sId, amount: btoa, linkRef: l });
-      }
-      // If neither, still show an undirected line
-      if (atob === 0 && btoa === 0) {
-        directedLinks.push({ sourceNode: sId, targetNode: tId, amount: l.value || 0, linkRef: l });
-      }
-    });
-
-    // Links — use the original links for d3 force, but render directed arrows
+    // Links
     const linkGroup = g.append('g').attr('class', 'links');
-
-    // We render from the original links (for force), then overlay arrows per direction
     const linkLines = linkGroup.selectAll('line')
       .data(links)
       .enter()
       .append('line')
-      .attr('stroke', 'rgba(255,255,255,0.12)')
-      .attr('stroke-width', 0.7)
-      .attr('marker-end', (l: any) => {
-        // Show arrow based on primary direction
-        const atob = l.atob || 0;
-        const btoa_val = l.btoa || 0;
-        if (atob > 0 || btoa_val > 0) return 'url(#arrow)';
-        return '';
-      });
+      .attr('stroke', 'rgba(255,255,255,0.15)')
+      .attr('stroke-width', 0.8)
+      .attr('marker-end', 'url(#arrow)');
 
     // Node groups
     const nodeGroup = g.append('g').attr('class', 'nodes');
@@ -291,17 +256,17 @@ const BubbleChart: React.FC<BubbleChartProps> = ({ data, width: propWidth, heigh
       .attr('pointer-events', 'none')
       .text(d => `${(d.percentage * 100).toFixed(1)}%`);
 
-    // Type badge for exchanges/contracts
-    nodeElements.filter(d => (d._radius || 0) > 8 && (d.isExchange || !!d.isContract))
+    // Contract badge
+    nodeElements.filter(d => (d._radius || 0) > 8 && !!d.isContract)
       .append('circle')
       .attr('cx', d => (d._radius || 5) * 0.65)
       .attr('cy', d => -(d._radius || 5) * 0.65)
       .attr('r', d => Math.max(2.5, (d._radius || 5) * 0.15))
-      .attr('fill', d => d.isExchange ? '#f97316' : '#10b981')
+      .attr('fill', '#10b981')
       .attr('stroke', '#0a0a18')
       .attr('stroke-width', 1);
 
-    // Hover events
+    // Hover — ONLY glow the hovered node, nothing else changes
     nodeElements
       .on('mouseenter', function (event: MouseEvent, d: NodeDatum) {
         const rect = svgRef.current?.getBoundingClientRect();
@@ -310,27 +275,22 @@ const BubbleChart: React.FC<BubbleChartProps> = ({ data, width: propWidth, heigh
           setHoverPos({ x: event.clientX - rect.left, y: event.clientY - rect.top });
         }
 
-        // Highlight connected links only, don't dim other nodes
+        // Highlight connected links
         linkLines
           .attr('stroke', (l: any) => {
             const sId = typeof l.source === 'object' ? l.source.id : l.source;
             const tId = typeof l.target === 'object' ? l.target.id : l.target;
-            return (sId === d.id || tId === d.id) ? '#fff' : 'rgba(255,255,255,0.12)';
+            return (sId === d.id || tId === d.id) ? '#fff' : 'rgba(255,255,255,0.15)';
           })
           .attr('stroke-width', (l: any) => {
             const sId = typeof l.source === 'object' ? l.source.id : l.source;
             const tId = typeof l.target === 'object' ? l.target.id : l.target;
-            return (sId === d.id || tId === d.id) ? 1.8 : 0.7;
-          })
-          .attr('marker-end', (l: any) => {
-            const sId = typeof l.source === 'object' ? l.source.id : l.source;
-            const tId = typeof l.target === 'object' ? l.target.id : l.target;
-            return (sId === d.id || tId === d.id) ? 'url(#arrow-hl)' : 'url(#arrow)';
+            return (sId === d.id || tId === d.id) ? 2 : 0.8;
           });
 
-        // Only glow the hovered node
-        d3.select(this).select('.main-circle').attr('filter', 'url(#glow)').attr('opacity', 1);
-        d3.select(this).select('.ring').attr('opacity', 1).attr('stroke-width', 3);
+        // ONLY glow this node — no opacity changes to anything else
+        d3.select(this).select('.main-circle').attr('filter', 'url(#glow)');
+        d3.select(this).select('.ring').attr('stroke-width', 3).attr('opacity', 1);
       })
       .on('mousemove', function (event: MouseEvent) {
         const rect = svgRef.current?.getBoundingClientRect();
@@ -338,18 +298,16 @@ const BubbleChart: React.FC<BubbleChartProps> = ({ data, width: propWidth, heigh
       })
       .on('mouseleave', function () {
         setHoveredNode(null);
+        // Reset links
         linkLines
-          .attr('stroke', 'rgba(255,255,255,0.12)')
-          .attr('stroke-width', 0.7)
-          .attr('marker-end', (l: any) => {
-            const atob = l.atob || 0;
-            const btoa_val = l.btoa || 0;
-            return (atob > 0 || btoa_val > 0) ? 'url(#arrow)' : '';
-          });
-        nodeElements.select('.main-circle').attr('opacity', 0.85).attr('filter', null);
-        nodeElements.select('.ring')
-          .attr('opacity', 0.6)
-          .attr('stroke-width', (d: any) => Math.max(1, (d._radius || 5) * 0.07));
+          .attr('stroke', 'rgba(255,255,255,0.15)')
+          .attr('stroke-width', 0.8);
+        // Reset only this node's glow
+        d3.select(this).select('.main-circle').attr('filter', null);
+        const nodeData = d3.select(this).datum() as NodeDatum;
+        d3.select(this).select('.ring')
+          .attr('stroke-width', Math.max(1, (nodeData._radius || 5) * 0.07))
+          .attr('opacity', 0.6);
       })
       .on('click', function (_: MouseEvent, d: NodeDatum) {
         setSelectedWallet(prev => prev?.id === d.id ? null : d);
@@ -368,19 +326,19 @@ const BubbleChart: React.FC<BubbleChartProps> = ({ data, width: propWidth, heigh
       });
     nodeElements.call(drag);
 
-    // Simulation
+    // Simulation — increased link distance
     const simulation = d3.forceSimulation<NodeDatum>(nodes)
       .force('link', d3.forceLink<NodeDatum, LinkDatum>(links)
         .id(d => d.id)
         .distance(d => {
           const s = d.source as NodeDatum;
           const t = d.target as NodeDatum;
-          return ((s._radius || 5) + (t._radius || 5)) * 1.1 + 6;
+          return ((s._radius || 5) + (t._radius || 5)) * 2 + 30;
         })
         .strength(d => {
           const s = d.source as NodeDatum;
           const t = d.target as NodeDatum;
-          return s._cluster === t._cluster ? 1.0 : 0.05;
+          return s._cluster === t._cluster ? 0.6 : 0.03;
         })
       )
       .force('charge', d3.forceManyBody<NodeDatum>().strength(d => -(d._radius || 5) * 3))
@@ -390,9 +348,9 @@ const BubbleChart: React.FC<BubbleChartProps> = ({ data, width: propWidth, heigh
         .iterations(4)
       )
       .force('cluster', clusterForce)
-      .force('center', d3.forceCenter(0, 0).strength(0.02))
+      .force('center', d3.forceCenter(0, 0).strength(0.015))
       .alpha(1)
-      .alphaDecay(0.015)
+      .alphaDecay(0.012)
       .velocityDecay(0.35)
       .on('tick', () => {
         linkLines
@@ -403,18 +361,15 @@ const BubbleChart: React.FC<BubbleChartProps> = ({ data, width: propWidth, heigh
             const dy = d.target.y - d.source.y;
             const dist = Math.sqrt(dx * dx + dy * dy);
             if (dist === 0) return d.target.x;
-            const r = d.target._radius || 5;
-            return d.target.x - (dx / dist) * (r + 4);
+            return d.target.x - (dx / dist) * ((d.target._radius || 5) + 4);
           })
           .attr('y2', (d: any) => {
             const dx = d.target.x - d.source.x;
             const dy = d.target.y - d.source.y;
             const dist = Math.sqrt(dx * dx + dy * dy);
             if (dist === 0) return d.target.y;
-            const r = d.target._radius || 5;
-            return d.target.y - (dy / dist) * (r + 4);
+            return d.target.y - (dy / dist) * ((d.target._radius || 5) + 4);
           });
-
         nodeElements.attr('transform', (d: NodeDatum) => `translate(${d.x},${d.y})`);
       });
 
@@ -426,22 +381,28 @@ const BubbleChart: React.FC<BubbleChartProps> = ({ data, width: propWidth, heigh
   useEffect(() => {
     if (!svgRef.current || !highlightedId) return;
     const svg = d3.select(svgRef.current);
-    svg.selectAll('.node-g').select('.ring')
-      .attr('stroke-width', (d: any) => d.id === highlightedId ? 4 : Math.max(1, (d._radius || 5) * 0.07))
-      .attr('opacity', (d: any) => d.id === highlightedId ? 1 : 0.6);
-    svg.selectAll('.node-g').select('.main-circle')
-      .attr('filter', (d: any) => d.id === highlightedId ? 'url(#pulse)' : null)
-      .attr('opacity', (d: any) => d.id === highlightedId ? 1 : 0.85);
+    svg.selectAll('.node-g').each(function () {
+      const el = d3.select(this);
+      const d = el.datum() as NodeDatum;
+      if (d.id === highlightedId) {
+        el.select('.main-circle').attr('filter', 'url(#pulse)');
+        el.select('.ring').attr('stroke-width', 4).attr('opacity', 1);
+      }
+    });
 
     return () => {
-      svg.selectAll('.node-g').select('.ring')
-        .attr('stroke-width', (d: any) => Math.max(1, (d._radius || 5) * 0.07))
-        .attr('opacity', 0.6);
-      svg.selectAll('.node-g').select('.main-circle').attr('filter', null).attr('opacity', 0.85);
+      svg.selectAll('.node-g').each(function () {
+        const el = d3.select(this);
+        const d = el.datum() as NodeDatum;
+        el.select('.main-circle').attr('filter', null);
+        el.select('.ring')
+          .attr('stroke-width', Math.max(1, (d._radius || 5) * 0.07))
+          .attr('opacity', 0.6);
+      });
     };
   }, [highlightedId]);
 
-  // Get connected links for selected wallet
+  // Connected links count for selected wallet
   const selectedLinks = useMemo(() => {
     if (!selectedWallet) return [];
     return processedData.links.filter((l: any) => {
@@ -522,7 +483,6 @@ const BubbleChart: React.FC<BubbleChartProps> = ({ data, width: propWidth, heigh
           gap: 16, fontSize: 11, color: 'rgba(255,255,255,0.6)', zIndex: 10,
         }}>
           <span><span style={{ color: '#8a5cf6' }}>●</span> Wallets</span>
-          <span><span style={{ color: '#f59e0b' }}>●</span> Exchanges</span>
           <span><span style={{ color: '#10b981' }}>●</span> Contracts</span>
         </div>
 
@@ -545,7 +505,7 @@ const BubbleChart: React.FC<BubbleChartProps> = ({ data, width: propWidth, heigh
         )}
       </div>
 
-      {/* Sidebar */}
+      {/* Sidebar — shows ALL wallets including exchanges */}
       <div style={{
         width: 320, background: 'rgba(15, 15, 35, 0.95)',
         borderLeft: '1px solid rgba(255,255,255,0.08)',
@@ -576,6 +536,7 @@ const BubbleChart: React.FC<BubbleChartProps> = ({ data, width: propWidth, heigh
                 borderRadius: 8, cursor: 'pointer', transition: 'background 0.15s',
                 background: selectedWallet?.id === wallet.id ? 'rgba(255,255,255,0.08)' : 'transparent',
                 borderLeft: `3px solid ${wallet._clusterColor || wallet.color}`, marginBottom: 1,
+                opacity: wallet.isExchange ? 0.6 : 1,
               }}
             >
               <span style={{
@@ -600,6 +561,7 @@ const BubbleChart: React.FC<BubbleChartProps> = ({ data, width: propWidth, heigh
                   fontFamily: 'monospace',
                 }}>
                   {wallet.name}
+                  {wallet.isExchange && <span style={{ fontSize: 9, color: '#f59e0b', marginLeft: 4 }}>(exchange)</span>}
                 </div>
               </div>
 
