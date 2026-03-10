@@ -12,8 +12,9 @@ export interface NodeDatum extends d3.SimulationNodeDatum {
   isContract?: boolean;
   cluster?: string;
   clusterPercentage?: number;
-  // Internal fields added by chart
+  // Internal fields
   _radius?: number;
+  _cluster?: number;
   _clusterColor?: string;
 }
 
@@ -21,6 +22,8 @@ export interface LinkDatum extends d3.SimulationLinkDatum<NodeDatum> {
   source: string | NodeDatum;
   target: string | NodeDatum;
   value: number;
+  atob?: number;   // Amount transferred from source to target
+  btoa?: number;   // Amount transferred from target to source
 }
 
 export interface ChartData {
